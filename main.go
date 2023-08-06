@@ -1,96 +1,82 @@
 package main
 
 import (
-	"fmt"
+	"io"
 	"log"
+	"net/http"
 
 	"github.com/gomodule/redigo/redis"
 )
 
-type Mahasiswa struct {
-	Name      string  `redis:"name"`
-	StudentId string  `redis:"student_id"`
-	GPA       float64 `redis:"gpa"`
-	Semester  int     `redis:"semester"`
+func main() {
+	http.HandleFunc("/pokemonwithoutredis", getPokemonWithOutRedis)
+	http.HandleFunc("/pokemonwithredis", getPokemonWithRedis)
+
+	log.Println("Server is running")
+	log.Fatal(http.ListenAndServe(":4000", nil))
 }
 
-func main() {
-	// Create Connection (Not Secure for Concurrency)
+func getPokemonWithOutRedis(w http.ResponseWriter, r *http.Request) {
+	pokemonName := r.URL.Query().Get("pokemon")
+
+	client := http.DefaultClient
+
+	req, err := http.NewRequest(http.MethodGet, "https://pokeapi.co/api/v2/pokemon/"+pokemonName, nil)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	res, err := client.Do(req)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	bytes, _ := io.ReadAll(res.Body)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(bytes)
+}
+
+func getPokemonWithRedis(w http.ResponseWriter, r *http.Request) {
+	pokemonName := r.URL.Query().Get("pokemon")
+
 	conn, err := redis.Dial("tcp", "localhost:6379")
 	if err != nil {
 		log.Panic(err)
 	}
 
-	// Send Redis Command
-	_, err = conn.Do("HSET", "student:1", "name", "Andromeda", "student_id", "12345", "gpa", "3.45", "semester", "4")
+	// Check Data From Redis (is't already caching?)
+	reply, err := redis.Bytes(conn.Do("GET", pokemonName))
+	if err == nil {
+		// it's ready cache
+		w.Header().Add("Content-Type", "application/json")
+		w.Write(reply)
+		return
+	}
+
+	// Create Request API pokeapi
+	client := http.DefaultClient
+	req, err := http.NewRequest(http.MethodGet, "https://pokeapi.co/api/v2/pokemon/"+pokemonName, nil)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	// Type Convertion
-	name, err := redis.String(conn.Do("HGET", "student:1", "name"))
+	res, err := client.Do(req)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	studentId, err := redis.String(conn.Do("HGET", "student:1", "student_id"))
+	bytes, _ := io.ReadAll(res.Body)
+
+	// Save Response Data to Redis
+	_, err = conn.Do("SET", pokemonName, string(bytes))
 	if err != nil {
 		log.Panic(err)
 	}
 
-	gpa, err := redis.Float64(conn.Do("HGET", "student:1", "gpa"))
-	if err != nil {
-		log.Panic(err)
-	}
-
-	semester, err := redis.Int(conn.Do("HGET", "student:1", "semester"))
-	if err != nil {
-		log.Panic(err)
-	}
-
-	fmt.Println(name)      // Andromeda
-	fmt.Println(studentId) // 12345
-	fmt.Println(gpa)       // 3.45
-	fmt.Println(semester)  // 4
-
-	// Get All Data Hash/Map
-	replyMap, err := redis.StringMap(conn.Do("HGETALL", "student:1"))
-	if err != nil {
-		log.Panic(err)
-	}
-	fmt.Println(replyMap) // map[gpa:3.45 name:Andromeda name:Andromeda student_id:12345 semester:4]
-
-	replyAny, err := redis.Values(conn.Do("HGETALL", "student:1"))
-	if err != nil {
-		log.Panic(err)
-	}
-
-	// Save All Data Hash/Map to Struct
-	var mahasiswa Mahasiswa
-
-	err = redis.ScanStruct(replyAny, &mahasiswa)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	fmt.Printf("%+v\n", mahasiswa) // {Name:Andromeda StudentId:12345 GPA:3.45 Semester:4}
-
-	// Create Connection Polling (Secure for Concurrency)
-	pool := &redis.Pool{
-		MaxIdle: 10,
-		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", "localhost:6379")
-		},
-		MaxActive: 10,
-	}
-
-	conn = pool.Get()
-	defer conn.Close()
-
-	reply, err := conn.Do("SET", "test", "oke")
-	if err != nil {
-		log.Panic(err)
-	}
-
-	fmt.Println(reply) // OK
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(bytes)
 }
+
+// Testing Speed
+// curl -o /dev/null -w "\n%{time_total} seconds\n" http://localhost:4000/pokemonwithoutredis?pokemon=pikachu
+// curl -o /dev/null -w "\n%{time_total} seconds\n" http://localhost:4000/pokemonwithredis?pokemon=pikachu
